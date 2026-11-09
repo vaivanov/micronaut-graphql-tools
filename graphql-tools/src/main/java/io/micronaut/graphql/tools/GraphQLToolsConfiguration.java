@@ -46,6 +46,7 @@ public class GraphQLToolsConfiguration {
     private List<String> allowUnreachable = Collections.emptyList();
     private Precedence precedence = Precedence.STRICT;
     private List<String> resolverDirectives = Collections.emptyList();
+    private List<String> inertDirectives = Collections.emptyList();
     private boolean strict = true;
     private InputConfiguration input = new InputConfiguration();
 
@@ -131,6 +132,27 @@ public class GraphQLToolsConfiguration {
     public void setResolverDirectives(@NonNull List<String> resolverDirectives) {
         ArgumentUtils.requireNonNull("resolverDirectives", resolverDirectives);
         this.resolverDirectives = List.copyOf(resolverDirectives);
+    }
+
+    /**
+     * @return the directives the schema may apply without a wiring, because they have no effect at runtime
+     */
+    @NonNull
+    public List<String> getInertDirectives() {
+        return inertDirectives;
+    }
+
+    /**
+     * Sets the directives the schema may apply without a wiring, because they have no effect at runtime (names
+     * without {@code @}). Any other directive the schema applies needs a wiring, except graphql-java's built-in
+     * ones. Every name must be a directive the schema declares and that has no wiring; any other name fails the
+     * startup, so the list cannot go stale. Default: empty.
+     *
+     * @param inertDirectives the directive names
+     */
+    public void setInertDirectives(@NonNull List<String> inertDirectives) {
+        ArgumentUtils.requireNonNull("inertDirectives", inertDirectives);
+        this.inertDirectives = List.copyOf(inertDirectives);
     }
 
     /**

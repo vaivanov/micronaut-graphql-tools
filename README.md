@@ -476,6 +476,7 @@ String updateProfile(ArgumentValue<String> nickname, ArgumentValue<ProfileInput>
 | `micronaut.graphql.tools.manifest.path` | file path (none) | Where to write it; without a path it is logged at INFO. |
 | `micronaut.graphql.tools.input.detect-omission` | `false` \| `true` | Enables `ArgumentValue<T>` parameters and input properties, which tell an omitted value from an explicit `null`; see [Omitted values and `null`](#omitted-values-and-null). |
 | `micronaut.graphql.tools.input.unmapped-properties` | not set \| `fail` \| `ignore` | Input class properties that the GraphQL input type does not define. Not set: they fail in [strict mode](#strict-mode) and are accepted without it. `fail` stops the startup with one error that lists them for every input class, also with `strict: false`; `ignore` accepts them, also in strict mode. See [Input classes and input types](#input-classes-and-input-types). |
+| `micronaut.graphql.tools.inert-directives` | list of directive names, without `@` (empty) | Directives the schema may apply without a wiring, because they have no effect at runtime; they are logged at INFO. Every other applied directive needs a wiring (see [Schema directives](#schema-directives)). Every entry must be a directive the schema declares, that is not built in and that has no wiring, otherwise the startup fails, so the list cannot go stale. |
 
 ```yaml
 micronaut:
@@ -807,6 +808,143 @@ Declare the getter on the interface, or resolve the field with a `@GraphQLTypeRe
 **Behaviour change:** before, such an interface was read through its one annotated implementation class, so getters
 of that class bound even when the interface did not declare them. There is no option to keep that: the binding
 silently depended on which class happened to implement the interface.
+
+## Customizing the schema
+
+Three kinds of beans change what the library builds. Each kind may have any number of beans; they run lowest order
+first, by `@Order` on the bean class or factory method, or by `Ordered#getOrder()` if the bean implements `Ordered`.
+
+| Bean type | Receives | Runs |
+|---|---|---|
+| `TypeDefinitionRegistryCustomizer` | a copy of the application's `TypeDefinitionRegistry` bean (the bean itself stays unchanged) | before the binding: types and fields added here need a binding like any other |
+| `RuntimeWiringCustomizer` | the `RuntimeWiring.Builder` that holds the library's wiring | after the binding, before the schema is generated |
+| `GraphQLSchemaCustomizer` | the generated `GraphQLSchema`; returns the schema to use | last |
+
+A `RuntimeWiringCustomizer` may only **add** (scalars, directive wirings, field visibility, ...). If it replaces a data
+fetcher, default data fetcher, type resolver or scalar that the library registered, or the wiring factory, or puts a
+data fetcher or type resolver for a field or type the library wired into a code registry (`builder.codeRegistry(...)`,
+which graphql-java lets win), the startup fails with `RuntimeWiringOverrideException`, which names every replacement
+and the customizer that made it. Code registry entries for fields the library does not wire, and enum value
+providers, are allowed.
+(On graphql-java 25.1 the builder itself already rejects the first replaced data fetcher, default data fetcher, type
+resolver or scalar with `StrictModeWiringException`; 21.3 accepts them silently.) To wrap data fetchers, use a
+`SchemaDirectiveWiring`; to change the generated schema, use a `GraphQLSchemaCustomizer` (it replaces
+`RuntimeWiring.Builder#transformer`, which graphql-java 25 removed). The library does not check what a
+`GraphQLSchemaCustomizer` changes.
+
+```java
+@Bean
+@Singleton
+@Order(10)
+public RuntimeWiringCustomizer hideInternalFields() {
+    return builder -> builder.fieldVisibility(BlockedFields.newBlock().addPattern("Query.internal.*").build());
+}
+```
+
+## Schema directives
+
+The library applies an SDL directive wiring (`graphql.schema.idl.SchemaDirectiveWiring`) only through a
+`SchemaDirective` bean:
+
+- `SchemaDirective.named(name, wiring)` binds the wiring to **one** directive name; graphql-java calls it only for the
+  elements that apply that directive (`RuntimeWiring.Builder#directive`). Two such beans for one name fail the
+  startup with `DuplicateDirectiveWiringException`, and a `RuntimeWiringCustomizer` that replaces such a wiring fails
+  it with `RuntimeWiringOverrideException`.
+- `SchemaDirective.everyElement(names, wiring)` registers a wiring that graphql-java calls for **every** schema element
+  and that decides itself what to do (`RuntimeWiring.Builder#directiveWiring`); the names say which directives it
+  implements. These run lowest order first (`@Order` or `Ordered` on the `SchemaDirective` bean), so the first one
+  wraps a data fetcher innermost.
+
+A `SchemaDirectiveWiring` bean is **not** applied on its own: if no `SchemaDirective` bean wraps that instance, the
+startup fails with `UnwrappedDirectiveWiringException`, which names the bean. A wiring therefore never runs on every
+element just because it is a bean. To keep a wiring as a bean, inject it into the factory method of its
+`SchemaDirective`.
+
+**Every directive the schema applies must have a wiring**, or the startup fails with `UnwiredDirectivesException`,
+which lists every such directive and where the schema applies it. A directive counts as wired if a `SchemaDirective`
+bean names it, or if a `RuntimeWiringCustomizer` registers a wiring for it with `RuntimeWiring.Builder#directive`. A
+directive that is meant to have no effect at runtime (documentation, or enforced elsewhere) is listed in
+`micronaut.graphql.tools.inert-directives`. `SchemaDirectiveWiring` has no hook for the schema definition or for
+directive arguments, so a directive applied there can only be listed as inert, or be handled by a
+`GraphQLSchemaCustomizer`. Exempt: graphql-java's built-in directives (`@deprecated`, `@specifiedBy`, `@oneOf`,
+`@include`, `@skip`), directives the schema declares but never applies, and directives it applies without declaring
+them (graphql-java reports those). `SchemaDirective` names that the schema does not declare are logged at INFO and not
+used, so a shared module may wire more directives than one schema applies.
+
+```java
+@Bean
+@Singleton
+public SchemaDirective upper(UpperCaseWiring upperCaseWiring) { // UpperCaseWiring may be a bean
+    return SchemaDirective.named("upper", upperCaseWiring);
+}
+```
+
+graphql-java-extended-validation plugs in as a wiring for every element that names its constraint directives, and a
+`TypeDefinitionRegistryCustomizer` can add their declarations unless the SDL declares them:
+
+```java
+@Bean
+@Singleton
+public SchemaDirective validation() {
+    DirectiveConstraints constraints = DirectiveConstraints.newDirectiveConstraints().build();
+    return SchemaDirective.everyElement(constraints.getConstraints().keySet(),
+            new ValidationSchemaWiring(ValidationRules.newValidationRules().build()));
+}
+
+@Bean
+@Singleton
+public TypeDefinitionRegistryCustomizer validationDirectives() {
+    return registry -> registry.merge(DirectiveConstraints.newDirectiveConstraints().build().getDirectivesDeclaration());
+}
+```
+
+Use extended-validation 21.0 with graphql-java 21.3 and 24.0 with 25.1 (21.0 calls a `GraphQLCodeRegistry` method
+that graphql-java 25 removed); the library's tests run both.
+
+## Configuring the GraphQL bean
+
+`GraphQLBuilderCustomizer` beans receive the `GraphQL.Builder` of the library's `GraphQL` bean (created with the
+library's schema) before it is built, lowest order first (`@Order` or `Ordered`): instrumentation, a
+`PreparsedDocumentProvider`, execution strategies, the default `DataFetcherExceptionHandler`, and so on. A builder
+setter keeps one value, so a later customizer replaces what an earlier one set there; chain instrumentations with
+`ChainedInstrumentation`. The library itself never calls `doNotAddDefaultInstrumentations()`, which graphql-java 25
+removed.
+
+```java
+@Bean
+@Singleton
+public GraphQLBuilderCustomizer tracing(MyTracingInstrumentation instrumentation) {
+    return builder -> builder.instrumentation(instrumentation);
+}
+```
+
+## Building the GraphQL bean yourself
+
+The library creates two beans: the bound `GraphQLSchema`, and the `GraphQL` engine that runs it. Each one is created
+only when the application has no bean of that type:
+
+- An application that configures the engine itself (instrumentation, execution strategies, its own transport)
+  provides a `GraphQL` bean built from the library's `GraphQLSchema` bean. The library then creates no `GraphQL`
+  bean, so there is exactly one, and `GraphQLBuilderCustomizer` beans are not called.
+- An application that provides its own `GraphQLSchema` bean gets no binding from the library (no
+  `TypeDefinitionRegistry` is needed); the library's `GraphQL` bean, unless the application has one too, runs that
+  schema.
+
+```java
+@Bean
+@Singleton
+public GraphQL graphQL(GraphQLSchema schema, MyInstrumentation instrumentation) {
+    return GraphQL.newGraphQL(schema).instrumentation(instrumentation).build();
+}
+```
+
+[`test-suite/src/test/java/example/host`](test-suite/src/test/java/example/host) is such an application: it supplies the
+`TypeDefinitionRegistry`, consumes only the library's `GraphQLSchema` and builds its own `GraphQL` with its own
+instrumentation, which then serves the HTTP requests.
+
+The library brings `io.micronaut.graphql:micronaut-graphql` as an API dependency, and its HTTP controller serves
+whichever `GraphQL` bean exists. The library's own code does not use it, so an application with its own transport
+can exclude that dependency.
 
 ## Examples
 
