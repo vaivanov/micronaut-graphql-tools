@@ -11,6 +11,7 @@ import io.micronaut.context.annotation.Factory
 import io.micronaut.context.annotation.Requires
 import io.micronaut.context.exceptions.BeanInstantiationException
 import io.micronaut.graphql.tools.AbstractTest
+import io.micronaut.graphql.tools.BindingManifest
 import io.micronaut.graphql.tools.RuntimeWiringCustomizer
 import io.micronaut.graphql.tools.SchemaDirective
 import io.micronaut.graphql.tools.annotation.GraphQLRootResolver
@@ -182,6 +183,7 @@ scalar Sc @onScalar
         then:
         result.errors.isEmpty()
         result.data == [me: [email: 'me@example.com'], shout: 'SHOUT', amount: 1L]
+        applicationContext.getBean(BindingManifest).lines.every { !it.startsWith('!unwiredDirective ') }
         appender.list.any {
             it.level == Level.INFO && it.formattedMessage == 'Directives without a wiring, declared inert by ' +
                     'micronaut.graphql.tools.inert-directives: @auth, @cached'
@@ -204,6 +206,44 @@ scalar Sc @onScalar
   Wire each one with a SchemaDirective bean that names it (SchemaDirective.named, or SchemaDirective.everyElement for a wiring that sees every element), or list it in micronaut.graphql.tools.inert-directives if it has no effect at runtime.
 micronaut.graphql.tools.inert-directives lists directives that are built in, not declared in the schema, or that have a wiring: @deprecated (built into graphql-java), @missing (not declared in the schema), @upper (has a wiring).
   Remove them from the list."""
+    }
+
+    void "with strict false, unwired directives are a WARN that lists them, and !unwiredDirective lines"() {
+        given:
+        startContext(SCHEMA, SPEC_NAME, ALLOW + ['micronaut.graphql.tools.strict': false])
+
+        when:
+        def result = executeQuery('{ me { email } shout }')
+
+        then: 'the same directives and coordinates as the error of strict mode'
+        result.errors.isEmpty()
+        result.data == [me: [email: 'me@example.com'], shout: 'SHOUT']
+        appender.list.findAll { it.level == Level.WARN }*.formattedMessage == [
+                'micronaut.graphql.tools.strict is false, so the startup goes on: ' + UNWIRED_MESSAGE]
+
+        and: 'one line per unwired directive; built-in and wired ones have none'
+        applicationContext.getBean(BindingManifest).lines.findAll { it.startsWith('!unwiredDirective ') } == [
+                '!unwiredDirective auth', '!unwiredDirective cached']
+    }
+
+    void "with strict false, invalid inert-directives entries still fail the startup"() {
+        given:
+        startContext(SCHEMA, SPEC_NAME, ALLOW + [
+                'micronaut.graphql.tools.strict'          : false,
+                'micronaut.graphql.tools.inert-directives': ['cached', 'missing', 'upper']])
+
+        when:
+        getGraphQLBean()
+
+        then: 'only the invalid entries fail; @auth is a WARN'
+        def e = thrown(BeanInstantiationException)
+        e.cause instanceof UnwiredDirectivesException
+        e.cause.unwiredDirectives == []
+        e.cause.invalidInertDirectives == ['missing', 'upper']
+        appender.list.findAll { it.level == Level.WARN }*.formattedMessage == [
+                'micronaut.graphql.tools.strict is false, so the startup goes on: The schema applies directives that ' +
+                        'have no wiring: @auth (Filter.name, Query.me, Query.users, Role.ADMIN, User and 1 more).\n' +
+                        UNWIRED_MESSAGE.substring(UNWIRED_MESSAGE.indexOf('  Wire each'))]
     }
 
     void "a resolver-directives entry counts as wired, so it cannot be listed as inert"() {

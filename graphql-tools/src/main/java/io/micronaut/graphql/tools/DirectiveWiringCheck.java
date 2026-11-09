@@ -45,8 +45,12 @@ import java.util.TreeSet;
 
 /**
  * Checks that every directive the schema applies has a wiring or is declared inert
- * ({@link GraphQLToolsConfiguration#getInertDirectives()}). graphql-java's built-in directives are exempt: graphql-java
- * implements them itself.
+ * ({@link GraphQLToolsConfiguration#getInertDirectives()}). Without strict mode
+ * ({@link GraphQLToolsConfiguration#isStrict()}) a directive without either is a warning instead of an error; either way
+ * it is an {@code !unwiredDirective} line of the binding manifest. graphql-java's built-in directives are exempt:
+ * graphql-java implements them itself.
+ * The directives of {@link GraphQLToolsConfiguration#getResolverDirectives()} count as wired: the binding implements
+ * them.
  */
 @Internal
 final class DirectiveWiringCheck {
@@ -71,13 +75,16 @@ final class DirectiveWiringCheck {
      * @param everyElementDirectiveNames the directives that wirings for every element implement
      * @param schemaDirectiveNames       the directives that {@link SchemaDirective} beans implement
      * @param configuration              the options
-     * @throws UnwiredDirectivesException if a directive has no wiring or the inert list is invalid
+     * @param manifestRecorder           receives an {@code !unwiredDirective} line per directive without a wiring
+     * @throws UnwiredDirectivesException if a directive has no wiring in strict mode, or the inert list is invalid in
+     *                                    any mode
      */
     static void check(TypeDefinitionRegistry registry,
                       RuntimeWiring runtimeWiring,
                       Collection<String> everyElementDirectiveNames,
                       Collection<String> schemaDirectiveNames,
-                      GraphQLToolsConfiguration configuration) {
+                      GraphQLToolsConfiguration configuration,
+                      BindingManifestRecorder manifestRecorder) {
         Set<String> wired = new TreeSet<>(runtimeWiring.getRegisteredDirectiveWiring().keySet());
         wired.addAll(everyElementDirectiveNames);
         // the binding implements them: a field that carries one is bound by a type resolver method
@@ -107,8 +114,15 @@ final class DirectiveWiringCheck {
             }
         });
 
-        if (!unwired.isEmpty() || !invalidInert.isEmpty()) {
-            throw new UnwiredDirectivesException(unwired, invalidInert);
+        unwired.keySet().forEach(name -> manifestRecorder.diagnostic("unwiredDirective", name));
+        boolean strict = configuration.isStrict();
+        if (!strict && !unwired.isEmpty()) {
+            LOG.warn("{} is false, so the startup goes on: {}", GraphQLToolsConfiguration.PREFIX + ".strict",
+                    UnwiredDirectivesException.describeUnwired(unwired));
+        }
+        // an invalid inert entry fails in every mode, as an invalid allow-unreachable entry does
+        if ((strict && !unwired.isEmpty()) || !invalidInert.isEmpty()) {
+            throw new UnwiredDirectivesException(strict ? unwired : Map.of(), invalidInert);
         }
 
         if (!inert.isEmpty()) {

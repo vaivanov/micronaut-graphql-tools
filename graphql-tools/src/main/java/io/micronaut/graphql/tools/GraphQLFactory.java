@@ -89,7 +89,8 @@ public final class GraphQLFactory {
         RuntimeWiring runtimeWiring = graphQLRuntimeWiringGenerator.generate(customizers);
 
         DirectiveWiringCheck.check(registry, runtimeWiring, schemaDirectiveWirings.getEveryElementDirectiveNames(),
-                schemaDirectiveWirings.getDirectiveNames(), configuration);
+                schemaDirectiveWirings.getDirectiveNames(), configuration,
+                graphQLRuntimeWiringGenerator.getManifestRecorder());
 
         // destroys GraphQLResolversRegistry as it no use in runtime after we initialized RuntimeWiring successfully
         applicationContext.destroyBean(graphQLResolversRegistry);

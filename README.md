@@ -275,7 +275,7 @@ String → scalar · graphql.scalar.GraphqlStringCoercing · - · -
 - Lines starting with `!` are findings: `!unreachable Type` for a declared type nothing binds (allowed or ignored, see
   [Configuration](#configuration); an enum, input or scalar type that an argument of a directive definition uses,
   directly or through input fields, is reached), `!ambiguous Type.field · member | member` for a field decided by a lenient
-  `precedence`.
+  `precedence`, and the findings of [strict mode](#strict-mode) (`!unbound`, `!unusedDictionary`, `!unwiredDirective`).
 - Java types are written as `java.lang.reflect.Type#getTypeName()` writes them, from the reflected method or getter.
   Where reflection cannot find it (for example a native image without reflection configuration), they are written from
   Micronaut's compile-time metadata, which keeps no wildcards (`List<? extends Book>` is written
@@ -324,16 +324,22 @@ mistakes. Each finding is also a `!` line of the [binding manifest](#binding-man
   class or make the GraphQL type non-null. The startup fails with `IncorrectClassMappingException`. For a custom
   scalar this fails in every mode. A primitive for a non-null type and a primitive return type are fine. This finding
   has no `!` line in the manifest.
+- **Applied directives without a wiring** (`!unwiredDirective name`, one line per directive): a directive the schema
+  applies that no `SchemaDirective` bean, `RuntimeWiringCustomizer` or `resolver-directives` entry implements and that
+  `inert-directives` does not list (see [Schema directives](#schema-directives)). They are reported in one
+  `UnwiredDirectivesException`, which lists where each is applied.
 
-All findings except unreachable types, unmapped input class properties and primitives for nullable scalars are
-reported in one `StrictModeException`. `!ambiguous` lines are allowed by
+All findings except unreachable types, unmapped input class properties, primitives for nullable scalars and unwired
+directives are reported in one `StrictModeException`. `!ambiguous` lines are allowed by
 the `precedence` that produced them. Every schema field must be bound in every mode (`MethodNotFoundException`).
 
 With `strict: false` the library binds as before strict mode existed: only object, interface and union types are
 checked for reachability, and the findings appear in the manifest only. `allow-unreachable` may still name unreachable
 enum, input and scalar types, so switching strict mode off never makes a valid configuration fail; without strict mode
 those entries have no effect. Unmapped input class properties are accepted (unless `input.unmapped-properties: fail`)
-and primitives for nullable built-in scalars bind as before.
+and primitives for nullable built-in scalars bind as before. Applied directives without a wiring are logged as one
+warning that lists them as the error would, and the schema keeps them without effect. Invalid `inert-directives`
+entries still fail the startup, as invalid `allow-unreachable` entries do.
 
 ## Custom scalars
 
@@ -471,12 +477,12 @@ String updateProfile(ArgumentValue<String> nickname, ArgumentValue<ProfileInput>
 | `micronaut.graphql.tools.allow-unreachable` | list of type names (empty) | Unreachable types that are allowed even with `fail`; they are logged at INFO. Every entry must be an unreachable type of the schema (object, interface, union, enum, input or scalar; enum, input and scalar entries take effect in [strict mode](#strict-mode) only), otherwise the startup fails, so the list cannot go stale. |
 | `micronaut.graphql.tools.precedence` | `strict` \| `property-first` \| `resolver-first` | What binds a field that both a member of its Java type and a type resolver method can bind, see [Property or type resolver](#property-or-type-resolver). `strict` fails the startup. |
 | `micronaut.graphql.tools.resolver-directives` | list of directive names (empty) | A field carrying one of these directives is bound by a type resolver method, and fails the startup if none binds it. Each must be declared in the schema. |
-| `micronaut.graphql.tools.strict` | `true` \| `false` | Fail the startup on the findings listed in [Strict mode](#strict-mode), among them input class properties without an input field (unless `input.unmapped-properties` is set) and primitives for nullable built-in scalars. `false` binds as before and only lists them in the manifest. |
+| `micronaut.graphql.tools.strict` | `true` \| `false` | Fail the startup on the findings listed in [Strict mode](#strict-mode), among them input class properties without an input field (unless `input.unmapped-properties` is set), primitives for nullable built-in scalars and applied directives without a wiring. `false` binds as before and only lists them in the manifest (unwired directives are also logged as a warning). |
 | `micronaut.graphql.tools.manifest.enabled` | `false` \| `true` | Write the [binding manifest](#binding-manifest) at startup (this binds the schema at startup). |
 | `micronaut.graphql.tools.manifest.path` | file path (none) | Where to write it; without a path it is logged at INFO. |
 | `micronaut.graphql.tools.input.detect-omission` | `false` \| `true` | Enables `ArgumentValue<T>` parameters and input properties, which tell an omitted value from an explicit `null`; see [Omitted values and `null`](#omitted-values-and-null). |
 | `micronaut.graphql.tools.input.unmapped-properties` | not set \| `fail` \| `ignore` | Input class properties that the GraphQL input type does not define. Not set: they fail in [strict mode](#strict-mode) and are accepted without it. `fail` stops the startup with one error that lists them for every input class, also with `strict: false`; `ignore` accepts them, also in strict mode. See [Input classes and input types](#input-classes-and-input-types). |
-| `micronaut.graphql.tools.inert-directives` | list of directive names, without `@` (empty) | Directives the schema may apply without a wiring, because they have no effect at runtime; they are logged at INFO. Every other applied directive needs a wiring (see [Schema directives](#schema-directives)). Every entry must be a directive the schema declares, that is not built in and that has no wiring, otherwise the startup fails, so the list cannot go stale. |
+| `micronaut.graphql.tools.inert-directives` | list of directive names, without `@` (empty) | Directives the schema may apply without a wiring, because they have no effect at runtime; they are logged at INFO. Every other applied directive needs a wiring (see [Schema directives](#schema-directives)); without one it fails the startup in [strict mode](#strict-mode) and is a warning without it. Every entry must be a directive the schema declares, that is not built in, that has no wiring and that is not a `resolver-directives` entry, otherwise the startup fails in either mode, so the list cannot go stale. |
 
 ```yaml
 micronaut:
@@ -645,6 +651,9 @@ the running application knows:
   interface only they implement;
 - fields that a type resolver of an SDL interface binds, `!unusedDictionary` lines, and the `!unbound` lines of type
   resolver methods whose class only those parts may reach;
+- `!unwiredDirective` lines: directive wirings are runtime beans, so whether an applied directive has one is decided
+  at startup (with `inert-directives`, which has no processor option); in strict mode such a directive fails the
+  startup, so these lines appear only with `strict: false`;
 - the lines of a type the processor leaves to the startup for another reason (reported as a note, see above).
 
 The processor writes what it left out next to the manifest, as
@@ -655,15 +664,17 @@ The processor writes what it left out next to the manifest, as
 kind resolves
 kind scalar
 kind unusedDictionary
+kind unwiredDirective
 type Magazine
 field Book.name
 unbound example.MagazineResolver#issue(example.Magazine)
 ```
 
-`kind K` stands for every line of kind `K`; `type T` for every line about `T` (`T → ...`, `T.x ...`, `T/...`,
-`!ambiguous T.x ...`); `field T.f` for the line of the field and its `!ambiguous` line; `unbound M` for the line
-`!unbound M`. A comparison of both manifests removes from the startup manifest exactly what this record names, and
-nothing else, so the omissions come from the processor, never from a list in the build.
+`kind K` stands for every line of kind `K` (a binding line `... → K · ...` or a finding `!K ...`); `type T` for every
+line about `T` (`T → ...`, `T.x ...`, `T/...`, `!ambiguous T.x ...`); `field T.f` for the line of the field and
+its `!ambiguous` line; `unbound M` for the line `!unbound M`. A comparison of both manifests removes from the
+startup manifest exactly what this record names, and nothing else, so the omissions come from the processor, never
+from a list in the build.
 
 The header is identical when the processor and the library come from the same release (the `# binder:` line names
 the version of the jar). The library's tests compile fixtures with the processor, start them, and compare both
@@ -861,8 +872,10 @@ element just because it is a bean. To keep a wiring as a bean, inject it into th
 `SchemaDirective`.
 
 **Every directive the schema applies must have a wiring**, or the startup fails with `UnwiredDirectivesException`,
-which lists every such directive and where the schema applies it. A directive counts as wired if a `SchemaDirective`
-bean names it, or if a `RuntimeWiringCustomizer` registers a wiring for it with `RuntimeWiring.Builder#directive`. A
+which lists every such directive and where the schema applies it. With `strict: false` (see [Strict mode](#strict-mode)) the
+same list is a warning instead; either way each such directive is an `!unwiredDirective` line of the binding
+manifest. A directive counts as wired if a `SchemaDirective` bean names it, if a `RuntimeWiringCustomizer` registers a
+wiring for it with `RuntimeWiring.Builder#directive`, or if `resolver-directives` lists it (the binding implements it). A
 directive that is meant to have no effect at runtime (documentation, or enforced elsewhere) is listed in
 `micronaut.graphql.tools.inert-directives`. `SchemaDirectiveWiring` has no hook for the schema definition or for
 directive arguments, so a directive applied there can only be listed as inert, or be handled by a
